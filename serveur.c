@@ -17,10 +17,16 @@
 #include <sys/signal.h>
 #include <sys/wait.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+
+#include <sys/mman.h>
+#include <errno.h>
 
 #include "fon.h" /* Primitives de la boite a outils */
 
 #define SERVICE_DEFAUT "1111"
+#define MAX_CLIENTS 50
 
 void serveur_appli(char *service); /* programme serveur */
 
@@ -70,30 +76,72 @@ void serveur_appli(char *service)
 
 	// listening to upcoming requests
 	// 1000 requetes maximum dans la file d'attente
+	// handling a maximum of 50 clients at the same time
 	h_listen(socketFD, 1000);
+	int *connectedSockets = (int *)mmap(
+			NULL, MAX_CLIENTS * sizeof(int), PROT_READ | PROT_WRITE,
+			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
+	int *clientsCount = (int *)mmap(
+			NULL, sizeof(int), PROT_READ | PROT_WRITE,
+			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+WAITING:
 	// waiting for connection
-	int reqNumber = 1;
+	printf("====================================================\n");
+	printf("===== WAITING FOR CONNECTION =====");
+	// accepte the connection
+	int new_socket = h_accept(socketFD, p_sock_addr);
+	connectedSockets[*clientsCount] = new_socket;
+	(*clientsCount)++;
+
+	// fork the program if accepting a new request
+	pid_t p = fork();
+
 	while (true)
 	{
-		printf("====================================================\n");
-		printf("===== WAITING FOR CONNECTION =====");
+		// handle the request only if received one and created a new thread
+		if (p < 0)
+		{
+			perror("fork fail");
+			exit(1);
+		}
+		if (p > 0)
+		{
+			printf("I'm The Parent. %d\n", p);
+			msync(connectedSockets, MAX_CLIENTS * sizeof(int), MS_SYNC);
+			msync(clientsCount, MAX_CLIENTS * sizeof(int), MS_SYNC);
+			for (int i = 0; i < *clientsCount; i++)
+				fsync(connectedSockets[i]);
 
-		// accepte
-		int new_socket = h_accept(socketFD, p_sock_addr);
+			goto WAITING;
+		}
+		if (p == 0)
+		{
+			getpid();
+			char *request = malloc(sizeof(char) * 1024);
+			h_reads(new_socket, request, 1024);
+			printf("====================================================\n");
+			printf("Client : %s\n", request);
+			printf("====================================================\n");
 
-		char *request = malloc(sizeof(char) * 1024);
-		h_reads(new_socket, request, 1024);
-		printf("====================================================\n");
-		printf("Client : %s\n", request);
-		printf("====================================================\n");
+			// 	send the client's message to all other clients except the owner
+			for (int i = 0; i < *clientsCount; i++)
+				printf("connectedSockets[%d] = %d;\n", i, connectedSockets[i]);
 
-		//  respond
-		char *response = "Hello, World!";
-		h_writes(new_socket, response, 1024);
-		h_close(new_socket);
+			for (int i = 0; i < *clientsCount; i++)
+			{
+				// if (connectedSockets[i] != new_socket)
+				{
+					h_writes(connectedSockets[i], request, strlen(request));
+				}
+			}
 
-		printf("\n%d\n", reqNumber);
-		reqNumber++;
+			printf("clients Count : %d\n", *clientsCount);
+			free(request);
+		}
+
+		// close the connection
+		// h_close(new_socket);
 	}
 }
