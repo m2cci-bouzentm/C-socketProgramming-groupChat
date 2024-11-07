@@ -6,8 +6,8 @@
 /*									      */
 /******************************************************************************/
 /*									      */
-/*		Auteurs :  Bouzentouta Mohamed				      */
-/*		Date :  11/05/2024						      */
+/*		Auteurs :  Bouzentouta Mohamed, Tarek Ghalleb				      */
+/*		Date :  11/07/2024						      */
 /*									      */
 /******************************************************************************/
 
@@ -15,7 +15,6 @@
 
 #include <curses.h>
 #include <sys/signal.h>
-#include <sys/wait.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -29,11 +28,15 @@
 #define MAX_REQUESTS 10
 #define REQUEST_BUFFER_SIZE 1024
 
+void *recvAndBroadcastData(void *args);
+struct AcceptedSocket *accepteConnection(int serverSocketFD);
+void AccepteNewConnectionAndRecBroadcastItsData(int serverSocketFD);
+void serveur_appli(char *service);
+
 struct AcceptedSocket
 {
 	int socketFD;
 	struct sockaddr_in sock_addr;
-	int accptedSuccessfully;
 	int error;
 };
 
@@ -41,12 +44,6 @@ struct AcceptedSocket
 int connectedClients[MAX_CLIENTS];
 int connectedClientsCount = 0;
 
-struct AcceptedSocket *accepte_connection(int serverSocketFD);
-void *recvBroadcastData(void *args);
-void AccepteNewConnectionAndRecBroadcastDataItsData(int serverSocketFD);
-void serveur_appli(char *service); /* programme serveur */
-/******************************************************************************/
-/*---------------- programme serveur ------------------------------*/
 
 int main(int argc, char *argv[])
 {
@@ -74,73 +71,76 @@ int main(int argc, char *argv[])
 	serveur_appli(service);
 }
 
-struct AcceptedSocket *accepte_connection(int serverSocketFD)
+void *recvAndBroadcastData(void *args)
 {
-	printf("===== WAITING FOR CONNECTION =====");
-	// waiting for connection
-	// accepte the connection
-	struct sockaddr_in clientAddresse;
-	int clientSocketFD = h_accept(serverSocketFD, &clientAddresse);
-
-	struct AcceptedSocket *acceptedSocket = malloc(sizeof(struct AcceptedSocket));
-	acceptedSocket->socketFD = clientSocketFD;
-	acceptedSocket->sock_addr = clientAddresse;
-	acceptedSocket->accptedSuccessfully = clientSocketFD > 0;
-	if (!acceptedSocket->accptedSuccessfully)
-		acceptedSocket->error = clientSocketFD;
-
-	return acceptedSocket;
-}
-
-void *recvBroadcastData(void *args)
-{
+	// get the clientSocket from the args of the thread
 	struct AcceptedSocket *clientSocket = (struct AcceptedSocket *)args;
 
 	char *buffer = malloc(sizeof(char) * REQUEST_BUFFER_SIZE);
 	while (true)
 	{
+		// wait for client to receive the message
 		ssize_t charReceived = recv(clientSocket->socketFD, buffer, REQUEST_BUFFER_SIZE, 0);
-		if (charReceived > 0)
-		{
-			printf("================== Reading a msg ==================\n");
-			buffer[charReceived] = 0;
-			printf("Client : %s\n", buffer);
-
-			printf("================== broadcasting msg ==================\n");
-			for (int i = 0; i < connectedClientsCount; i++)
-			{
-				if (connectedClients[i] != clientSocket->socketFD)
-				{
-					send(connectedClients[i], buffer, REQUEST_BUFFER_SIZE, 0);
-				}
-			}
-		}
-		else if (charReceived == 0)
-			break;
-		else
+		if (charReceived < 0)
 		{
 			printf("Error receiving from socket : %d\n", clientSocket->socketFD);
 			break;
 		}
+
+		printf("================== Reading the msg ==================\n");
+		printf("%s\n", buffer);
+
+		printf("================== broadcasting msg ==================\n");
+		// sending the message to all connected clients except the original sender
+		for (int i = 0; i < connectedClientsCount; i++)
+		{
+			if (connectedClients[i] != clientSocket->socketFD)
+			{
+				printf("Sending to client %d\n", connectedClients[i]);
+				send(connectedClients[i], buffer, REQUEST_BUFFER_SIZE, 0);
+			}
+		}
 		printf("================== End reading / Broadcasting ==================\n");
 	}
-	free(buffer);
+
 	close(clientSocket->socketFD);
+	free(buffer);
+	free(clientSocket);
 }
 
-void AccepteNewConnectionAndRecBroadcastDataItsData(int serverSocketFD)
+struct AcceptedSocket *accepteConnection(int serverSocketFD)
+{
+	printf("===== WAITING FOR CONNECTION =====");
+	// waiting for connection
+	struct sockaddr_in clientAddresse;
+	int clientSocketFD = h_accept(serverSocketFD, &clientAddresse);
+
+	// populate the acceptedSocket structure and return to use it in the rest of the program
+	struct AcceptedSocket *acceptedSocket = malloc(sizeof(struct AcceptedSocket));
+	acceptedSocket->socketFD = clientSocketFD;
+	acceptedSocket->sock_addr = clientAddresse;
+	if (acceptedSocket->socketFD < 0)
+	{
+		acceptedSocket->error = clientSocketFD;
+	}
+
+	return acceptedSocket;
+}
+
+void AccepteNewConnectionAndRecBroadcastItsData(int serverSocketFD)
 {
 	while (true)
 	{
-		struct AcceptedSocket *clientSocket = accepte_connection(serverSocketFD);
+		// accepting upcoming connections on the main thread
+		struct AcceptedSocket *clientSocket = accepteConnection(serverSocketFD);
 
+		// registre new connected client/socket
 		connectedClients[connectedClientsCount] = clientSocket->socketFD;
 		connectedClientsCount++;
-		printf("connectedClientsCount : %d\n", connectedClientsCount);
 
-		// handle receving / sending data in a seperate thread for each clientSocket
+		// handle receving / sending data to clients in a seperate thread for each clientSocket
 		pthread_t id;
-		pthread_create(&id, NULL, recvBroadcastData, clientSocket);
+		pthread_create(&id, NULL, recvAndBroadcastData, clientSocket);
 	}
 }
 
@@ -157,7 +157,6 @@ void serveur_appli(char *service)
 	// binding local address to a socket with a specific
 	// 		local IP address (0.0.0.0 in this case) and port number
 	h_bind(serverSocketFD, p_sock_addr);
-	// free(p_sock_addr);
 
 	// listening to upcoming requests
 	// 10 requetes maximum dans la file d'attente
@@ -165,7 +164,8 @@ void serveur_appli(char *service)
 	h_listen(serverSocketFD, MAX_REQUESTS);
 
 	// start accepting upcoming connections on the main thread
-	AccepteNewConnectionAndRecBroadcastDataItsData(serverSocketFD);
+	AccepteNewConnectionAndRecBroadcastItsData(serverSocketFD);
 
+	free(p_sock_addr);
 	shutdown(serverSocketFD, SHUT_RDWR);
 }

@@ -1,19 +1,19 @@
 /******************************************************************************/
-/*			Application: Dialogue au clavier					*/
+/*			Application: Dialogue au clavier         */
 /******************************************************************************/
 /*									      */
-/*			 programme  CLIENT				      */
+/*			 programme  CLIENT 				      */
 /*									      */
 /******************************************************************************/
 /*									      */
-/*		Auteurs : Bouzentouta Mohamed 					*/
+/*		Auteurs :  Bouzentouta Mohamed, Tarek Ghalleb				      */
+/*		Date :  11/07/2024						      */
 /*									      */
 /******************************************************************************/
 
 #include <stdio.h>
 #include <curses.h> /* Primitives de gestion d'ecran */
 #include <sys/signal.h>
-#include <sys/wait.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -24,6 +24,8 @@
 #define SERVEUR_DEFAUT "127.0.0.1"
 #define REQUEST_BUFFER_SIZE 1024
 
+void send_message(int socketFD, struct sockaddr_in *p_serv_addr);
+void *receive_messages(void *args);
 void client_appli(char *serveur, char *service);
 
 /*****************************************************************************/
@@ -65,48 +67,55 @@ int main(int argc, char *argv[])
 /*****************************************************************************/
 void send_message(int socketFD, struct sockaddr_in *p_serv_addr)
 {
-	unsigned long lineSize = 0;
-	char *message = malloc(sizeof(char) * REQUEST_BUFFER_SIZE);
+	char *buffer = malloc(sizeof(char) * REQUEST_BUFFER_SIZE);
+	char *message = NULL;
+	char *name = NULL;
+	unsigned long messageSize = 0;
+	unsigned long nameSize = 0;
+
+	// ask the client for his name
+	printf("Enter your name : ");
+	int nameCount = getline(&name, &nameSize, stdin);
+	name[nameCount - 1] = 0; // removing \n charctere from the string
+
+	// start listening for client's requests/messages
 	while (true)
 	{
-		printf("Write a message : ");
-		long charCount = getline(&message, &lineSize, stdin);
+		int charCount = getline(&message, &messageSize, stdin);
+		// join the name and the message
+		sprintf(buffer, "%s: %s", name, message);
+
 		if (charCount > 0)
 		{
-			if (strcmp(message, "exit\n") == 0)
+			if (strcmp(message, "exit") == 0)
 			{
 				break;
 			}
-			h_sendto(socketFD, message, REQUEST_BUFFER_SIZE, p_serv_addr);
+			h_sendto(socketFD, buffer, REQUEST_BUFFER_SIZE, p_serv_addr);
 		}
 	}
 
-	free(message);
+	free(buffer);
 	close(socketFD);
 	exit(0);
 }
 
 void *receive_messages(void *args)
 {
-	int *s = (int *)args;
-	int socketFD = *s;
+	// get the socketFD from the args of the thread
+	int socketFD = *((int *)args);
 	char *buffer = malloc(sizeof(char) * REQUEST_BUFFER_SIZE);
 	while (true)
 	{
 		ssize_t charReceived = recv(socketFD, buffer, REQUEST_BUFFER_SIZE, 0);
-		// ssize_t charReceived = h_recvfrom(socketFD, buffer, REQUEST_BUFFER_SIZE, p_serv_addr);
-		if (charReceived > 0)
-		{
-			// buffer[charReceived] = 0;
-			printf("Server : %s\n", buffer);
-		}
-		else if (charReceived == 0)
-			break;
-		else
+		if (charReceived < 0)
 		{
 			printf("Error receiving from socket : %d\n", socketFD);
 			break;
 		}
+
+		// if no error print the received message
+		printf("\n%s", buffer);
 	}
 
 	free(buffer);
