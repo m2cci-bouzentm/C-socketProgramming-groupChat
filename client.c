@@ -22,14 +22,7 @@
 
 #define SERVICE_DEFAUT "1111"
 #define SERVEUR_DEFAUT "127.0.0.1"
-
-typedef struct thread_params
-{
-	int socketFD;
-	struct sockaddr_in *p_serv_addr;
-	char *message;
-	char *response;
-} thread_params_t;
+#define REQUEST_BUFFER_SIZE 1024
 
 void client_appli(char *serveur, char *service);
 
@@ -70,29 +63,54 @@ int main(int argc, char *argv[])
 }
 
 /*****************************************************************************/
-void *send_message(void *arg)
+void send_message(int socketFD, struct sockaddr_in *p_serv_addr)
 {
-	thread_params_t *params = (thread_params_t *)arg;
+	unsigned long lineSize = 0;
+	char *message = malloc(sizeof(char) * REQUEST_BUFFER_SIZE);
 	while (true)
 	{
 		printf("Write a message : ");
-		scanf("%s", params->message);
-		h_sendto(params->socketFD, params->message, 1024, params->p_serv_addr);
-		strcopy(params->message, "");
+		long charCount = getline(&message, &lineSize, stdin);
+		if (charCount > 0)
+		{
+			if (strcmp(message, "exit\n") == 0)
+			{
+				break;
+			}
+			h_sendto(socketFD, message, REQUEST_BUFFER_SIZE, p_serv_addr);
+		}
 	}
-}
-void *receive_messages(void *arg)
-{
-	thread_params_t *params = (thread_params_t *)arg;
-	int taille = sizeof(*params->p_serv_addr);
 
+	free(message);
+	close(socketFD);
+	exit(0);
+}
+
+void *receive_messages(void *args)
+{
+	int *s = (int *)args;
+	int socketFD = *s;
+	char *buffer = malloc(sizeof(char) * REQUEST_BUFFER_SIZE);
 	while (true)
 	{
-		// h_recvfrom(params->socketFD, params->response, 1024, params->p_serv_addr);
-		recvfrom(params->socketFD, params->response, 1024, 0, (struct sockaddr *)params->p_serv_addr, (socklen_t *)&taille);
-		printf("\nServer : %s\n", params->response);
-		strcopy(params->response, "");
+		ssize_t charReceived = recv(socketFD, buffer, REQUEST_BUFFER_SIZE, 0);
+		// ssize_t charReceived = h_recvfrom(socketFD, buffer, REQUEST_BUFFER_SIZE, p_serv_addr);
+		if (charReceived > 0)
+		{
+			// buffer[charReceived] = 0;
+			printf("Server : %s\n", buffer);
+		}
+		else if (charReceived == 0)
+			break;
+		else
+		{
+			printf("Error receiving from socket : %d\n", socketFD);
+			break;
+		}
 	}
+
+	free(buffer);
+	close(socketFD);
 }
 
 void client_appli(char *serveur, char *service)
@@ -103,26 +121,11 @@ void client_appli(char *serveur, char *service)
 	struct sockaddr_in *p_serv_addr = malloc(sizeof(struct sockaddr_in));
 	adr_socket(service, serveur, SOCK_STREAM, &p_serv_addr);
 	h_connect(socketFD, p_serv_addr);
-	char *message = malloc(sizeof(char) * 1024);
-	char *response = malloc(sizeof(char) * 1024);
 
-	pthread_t send_thread, receive_thread;
-	thread_params_t params;
-	params.socketFD = socketFD;
-	params.p_serv_addr = p_serv_addr;
-	params.message = malloc(sizeof(char) * 1024);
-	params.response = malloc(sizeof(char) * 1024);
+	// listen to incoming messages in separate thread as it's code blocking
+	pthread_t id;
+	pthread_create(&id, NULL, receive_messages, (void *)&socketFD);
 
-	int create_send_thread = pthread_create(&send_thread, NULL, send_message, &params);
-	int create_receive_thread = pthread_create(&receive_thread, NULL, receive_messages, &params);
-
-	if (create_send_thread != 0 || create_receive_thread != 0)
-	{
-		perror("Failed to a thread");
-		exit(1);
-	}
-
-	// free(params.p_serv_addr);
-	pthread_join(send_thread, NULL);
-	pthread_join(receive_thread, NULL);
+	// send messages in the main thread
+	send_message(socketFD, p_serv_addr);
 }

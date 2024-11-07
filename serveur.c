@@ -20,16 +20,31 @@
 #include <string.h>
 #include <sys/types.h>
 
-#include <sys/mman.h>
-#include <errno.h>
+#include <pthread.h>
 
 #include "fon.h" /* Primitives de la boite a outils */
 
 #define SERVICE_DEFAUT "1111"
 #define MAX_CLIENTS 50
+#define MAX_REQUESTS 10
+#define REQUEST_BUFFER_SIZE 1024
 
+struct AcceptedSocket
+{
+	int socketFD;
+	struct sockaddr_in sock_addr;
+	int accptedSuccessfully;
+	int error;
+};
+
+// global variables to track connected clients and their count
+int connectedClients[MAX_CLIENTS];
+int connectedClientsCount = 0;
+
+struct AcceptedSocket *accepte_connection(int serverSocketFD);
+void *recvBroadcastData(void *args);
+void AccepteNewConnectionAndRecBroadcastDataItsData(int serverSocketFD);
 void serveur_appli(char *service); /* programme serveur */
-
 /******************************************************************************/
 /*---------------- programme serveur ------------------------------*/
 
@@ -59,89 +74,98 @@ int main(int argc, char *argv[])
 	serveur_appli(service);
 }
 
+struct AcceptedSocket *accepte_connection(int serverSocketFD)
+{
+	printf("===== WAITING FOR CONNECTION =====");
+	// waiting for connection
+	// accepte the connection
+	struct sockaddr_in clientAddresse;
+	int clientSocketFD = h_accept(serverSocketFD, &clientAddresse);
+
+	struct AcceptedSocket *acceptedSocket = malloc(sizeof(struct AcceptedSocket));
+	acceptedSocket->socketFD = clientSocketFD;
+	acceptedSocket->sock_addr = clientAddresse;
+	acceptedSocket->accptedSuccessfully = clientSocketFD > 0;
+	if (!acceptedSocket->accptedSuccessfully)
+		acceptedSocket->error = clientSocketFD;
+
+	return acceptedSocket;
+}
+
+void *recvBroadcastData(void *args)
+{
+	struct AcceptedSocket *clientSocket = (struct AcceptedSocket *)args;
+
+	char *buffer = malloc(sizeof(char) * REQUEST_BUFFER_SIZE);
+	while (true)
+	{
+		ssize_t charReceived = recv(clientSocket->socketFD, buffer, REQUEST_BUFFER_SIZE, 0);
+		if (charReceived > 0)
+		{
+			printf("================== Reading a msg ==================\n");
+			buffer[charReceived] = 0;
+			printf("Client : %s\n", buffer);
+
+			printf("================== broadcasting msg ==================\n");
+			for (int i = 0; i < connectedClientsCount; i++)
+			{
+				if (connectedClients[i] != clientSocket->socketFD)
+				{
+					send(connectedClients[i], buffer, REQUEST_BUFFER_SIZE, 0);
+				}
+			}
+		}
+		else if (charReceived == 0)
+			break;
+		else
+		{
+			printf("Error receiving from socket : %d\n", clientSocket->socketFD);
+			break;
+		}
+		printf("================== End reading / Broadcasting ==================\n");
+	}
+	free(buffer);
+	close(clientSocket->socketFD);
+}
+
+void AccepteNewConnectionAndRecBroadcastDataItsData(int serverSocketFD)
+{
+	while (true)
+	{
+		struct AcceptedSocket *clientSocket = accepte_connection(serverSocketFD);
+
+		connectedClients[connectedClientsCount] = clientSocket->socketFD;
+		connectedClientsCount++;
+		printf("connectedClientsCount : %d\n", connectedClientsCount);
+
+		// handle receving / sending data in a seperate thread for each clientSocket
+		pthread_t id;
+		pthread_create(&id, NULL, recvBroadcastData, clientSocket);
+	}
+}
+
 void serveur_appli(char *service)
 {
 	// Error handling done by the fon.c library / Thank you Professor !
-	int socketFD = h_socket(AF_INET, SOCK_STREAM);
+	int serverSocketFD = h_socket(AF_INET, SOCK_STREAM);
 	struct sockaddr_in *p_sock_addr = malloc(sizeof(struct sockaddr_in));
 
 	// calling the adr_socket to populate p_sock_addr for us
 	// NULL here refers to 0.0.0.0,
 	// 		so will be listening to all up coming request no matter the IP addresses
 	adr_socket(service, NULL, SOCK_STREAM, &p_sock_addr);
-
 	// binding local address to a socket with a specific
 	// 		local IP address (0.0.0.0 in this case) and port number
-	h_bind(socketFD, p_sock_addr);
+	h_bind(serverSocketFD, p_sock_addr);
+	// free(p_sock_addr);
 
 	// listening to upcoming requests
-	// 1000 requetes maximum dans la file d'attente
+	// 10 requetes maximum dans la file d'attente
 	// handling a maximum of 50 clients at the same time
-	h_listen(socketFD, 1000);
-	int *connectedSockets = (int *)mmap(
-			NULL, MAX_CLIENTS * sizeof(int), PROT_READ | PROT_WRITE,
-			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	h_listen(serverSocketFD, MAX_REQUESTS);
 
-	int *clientsCount = (int *)mmap(
-			NULL, sizeof(int), PROT_READ | PROT_WRITE,
-			MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	// start accepting upcoming connections on the main thread
+	AccepteNewConnectionAndRecBroadcastDataItsData(serverSocketFD);
 
-WAITING:
-	// waiting for connection
-	printf("====================================================\n");
-	printf("===== WAITING FOR CONNECTION =====");
-	// accepte the connection
-	int new_socket = h_accept(socketFD, p_sock_addr);
-	connectedSockets[*clientsCount] = new_socket;
-	(*clientsCount)++;
-
-	// fork the program if accepting a new request
-	pid_t p = fork();
-
-	while (true)
-	{
-		// handle the request only if received one and created a new thread
-		if (p < 0)
-		{
-			perror("fork fail");
-			exit(1);
-		}
-		if (p > 0)
-		{
-			printf("I'm The Parent. %d\n", p);
-			msync(connectedSockets, MAX_CLIENTS * sizeof(int), MS_SYNC);
-			msync(clientsCount, MAX_CLIENTS * sizeof(int), MS_SYNC);
-			for (int i = 0; i < *clientsCount; i++)
-				fsync(connectedSockets[i]);
-
-			goto WAITING;
-		}
-		if (p == 0)
-		{
-			getpid();
-			char *request = malloc(sizeof(char) * 1024);
-			h_reads(new_socket, request, 1024);
-			printf("====================================================\n");
-			printf("Client : %s\n", request);
-			printf("====================================================\n");
-
-			// 	send the client's message to all other clients except the owner
-			for (int i = 0; i < *clientsCount; i++)
-				printf("connectedSockets[%d] = %d;\n", i, connectedSockets[i]);
-
-			for (int i = 0; i < *clientsCount; i++)
-			{
-				// if (connectedSockets[i] != new_socket)
-				{
-					h_writes(connectedSockets[i], request, strlen(request));
-				}
-			}
-
-			printf("clients Count : %d\n", *clientsCount);
-			free(request);
-		}
-
-		// close the connection
-		// h_close(new_socket);
-	}
+	shutdown(serverSocketFD, SHUT_RDWR);
 }
