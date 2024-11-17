@@ -7,7 +7,7 @@
 /******************************************************************************/
 /*									      */
 /*		Auteurs :  Bouzentouta Mohamed, Tarek Ghalleb				      */
-/*		Date :  11/07/2024						      */
+/*		Date :  04/11/2024						      */
 /*									      */
 /******************************************************************************/
 
@@ -87,10 +87,11 @@ void send_message(int socketFD, struct sockaddr_in *p_serv_addr)
 
 		if (charCount > 0)
 		{
-			if (strcmp(message, "exit") == 0)
+			if (strcmp(message, "exit\n") == 0)
 			{
 				break;
 			}
+
 			h_sendto(socketFD, buffer, REQUEST_BUFFER_SIZE, p_serv_addr);
 		}
 	}
